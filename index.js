@@ -16,53 +16,58 @@ function sanitizeStreamUrl(url) {
 }
 
 // ==========================================
-// KHAI BÁO MẶT TIỀN (MANIFEST)
+// 1. MẶT TIỀN NỘI BỘ (MANIFEST & CATALOG)
 // ==========================================
 app.get('/manifest.json', (req, res) => {
     res.json({
         id: "com.nuvio.vietstream.pro",
-        version: "1.0.0",
-        name: "VietStream Pro (Real-time)",
-        description: "Rạp phim cá nhân cập nhật siêu tốc từ nguồn Việt Nam.",
+        version: "2.0.0",
+        name: "VietStream Pro (SpeedX)",
+        description: "Hệ thống cào link thông minh tích hợp Radar Tìm Kiếm.",
         resources: ["stream", "catalog"],
         types: ["movie", "series"],
-        idPrefixes: ["tt", "kk"], 
+        idPrefixes: ["tt", "kk"], // 'kk' là tiền tố nội bộ của chúng ta
         catalogs: [
             {
                 type: "movie",
-                id: "kkphim_new",
-                name: "🔥 Rạp Chiếu Nóng Hổi",
+                id: "kk_phim_le",
+                name: "🔥 Phim Lẻ Mới Nhất",
+                extra: [{ name: "skip", isRequired: false }]
+            },
+            {
+                type: "series",
+                id: "kk_phim_bo",
+                name: "📺 Phim Bộ Trending",
                 extra: [{ name: "skip", isRequired: false }]
             }
         ]
     });
 });
 
-// ==========================================
-// GIAO LỘ PHÂN VÙNG (CATALOG)
-// ==========================================
 const catalogHandler = async (req, res) => {
+    const { id } = req.params;
     let page = 1;
     if (req.params.extra) {
         const match = req.params.extra.match(/skip=(\d+)/);
-        if (match) page = Math.floor(parseInt(match[1]) / 10) + 1;
+        if (match) page = Math.floor(parseInt(match[1]) / 20) + 1; // KKPhim thường trả 20 item/trang
     }
 
+    // Phân luồng API dựa trên danh mục bạn chọn
+    const apiUrl = id === 'kk_phim_le' 
+        ? `https://kkphim.com/api/v1/danh-sach/phim-le?page=${page}`
+        : `https://kkphim.com/api/v1/danh-sach/phim-bo?page=${page}`;
+
     try {
-        const response = await fetch(`https://kkphim.com/api/v1/danh-sach/phim-moi-cap-nhat?page=${page}`);
+        const response = await fetch(apiUrl);
         const data = await response.json();
 
-        const metas = data.data.items.map(item => {
-            const genreTags = item.category ? item.category.map(c => c.name) : ["Đang cập nhật"];
-            return {
-                id: item.slug, // Nuvio sẽ dùng ID này để gọi stream
-                type: "movie",
-                name: item.name,
-                poster: `https://phimimg.com/${item.thumb_url}`,
-                genres: genreTags,
-                description: `🎭 Thể loại: ${genreTags.join(" • ")}\n🌍 Nguồn: ${item.origin_name}\n\nĐã cập nhật lên danh sách tốc độ cao!` 
-            };
-        });
+        const metas = data.data.items.map(item => ({
+            id: `kk:${item.slug}`, // Đóng dấu tiền tố nội bộ 'kk:'
+            type: id === 'kk_phim_le' ? "movie" : "series",
+            name: item.name,
+            poster: `https://phimimg.com/${item.thumb_url}`,
+            description: `Năm: ${item.year}\nChất lượng: ${item.quality}\nNgôn ngữ: ${item.lang}`
+        }));
 
         res.json({ metas: metas });
     } catch (error) {
@@ -70,57 +75,65 @@ const catalogHandler = async (req, res) => {
     }
 };
 
-// SỬA LỖI 404: Tách thành 2 đường dẫn độc lập để Express bắt chuẩn xác
 app.get('/catalog/:type/:id.json', catalogHandler);
 app.get('/catalog/:type/:id/:extra.json', catalogHandler);
 
 // ==========================================
-// LÕI ĐUA TỐC ĐỘ (PROMISE.ANY)
+// 2. RADAR TÌM KIẾM KÉP & LẤY LINK
 // ==========================================
-async function fetchKKphim(slug) {
-    const res = await fetch(`https://kkphim.com/api/v1/movie/${slug}`);
-    const data = await res.json();
-    if (!data.status) throw new Error("Not found");
-    return { server: "KKPhim", url: data.movie.episodes[0].server_data[0].link_m3u8, title: "💎 FHD (KKPhim)" };
+async function getSlugFromSearch(title) {
+    try {
+        const res = await fetch(`https://kkphim.com/api/v1/search?keyword=${encodeURIComponent(title)}`);
+        const data = await res.json();
+        if (data && data.data && data.data.items && data.data.items.length > 0) {
+            return data.data.items[0].slug; // Lấy kết quả khớp nhất đầu tiên
+        }
+    } catch (e) {
+        console.log("Search error:", e);
+    }
+    return null;
 }
 
-async function fetchNguonC(slug) {
-    const res = await fetch(`https://phim.nguonc.com/api/v1/movie/${slug}`);
+async function fetchStreamBySlug(slug, serverName, apiUrlPrefix) {
+    const res = await fetch(`${apiUrlPrefix}/movie/${slug}`);
     const data = await res.json();
-    if (!data.status) throw new Error("Not found");
-    return { server: "Nguồn C", url: data.movie.episodes[0].server_data[0].link_m3u8, title: "✨ HD (Nguồn C)" };
+    if (!data.status || !data.movie.episodes[0].server_data[0]) throw new Error("Not found");
+    return { 
+        server: serverName, 
+        url: sanitizeStreamUrl(data.movie.episodes[0].server_data[0].link_m3u8), 
+        title: `⚡ Tốc độ cao (${serverName})` 
+    };
 }
 
 app.get('/stream/:type/:id.json', async (req, res) => {
-    const { type, id } = req.params;
-    let cleanId = id.split(':')[0]; 
-
-    // BỘ DỊCH THUẬT: Biến mã IMDB (tt...) thành tên phim không dấu (slug)
-    if (cleanId.startsWith('tt')) {
-        try {
-            const metaRes = await fetch(`https://v3-cinemeta.strem.io/meta/${type}/${cleanId}.json`);
-            const metaData = await metaRes.json();
-            if (metaData && metaData.meta) {
-                const title = metaData.meta.name;
-                cleanId = title.toLowerCase()
-                    .normalize("NFD")
-                    .replace(/[\u0300-\u036f]/g, "") // Xóa dấu tiếng Việt
-                    .replace(/[^a-z0-9\s-]/g, '')    // Giữ lại chữ, số và khoảng trắng
-                    .trim()
-                    .replace(/\s+/g, '-');           // Đổi khoảng trắng thành gạch ngang
-            }
-        } catch (e) {
-            console.log("Lỗi dịch ID:", e);
-        }
-    }
+    let { type, id } = req.params;
+    let targetSlug = "";
 
     try {
+        // Kịch bản 1: Bấm từ Mặt Tiền Nội Bộ (id có chứa kk:)
+        if (id.startsWith('kk:')) {
+            targetSlug = id.replace('kk:', '').split(':')[0];
+        } 
+        // Kịch bản 2: Bấm từ danh mục Quốc Tế Cinemeta (id chứa tt...)
+        else if (id.startsWith('tt')) {
+            const cleanId = id.split(':')[0];
+            const metaRes = await fetch(`https://v3-cinemeta.strem.io/meta/${type}/${cleanId}.json`);
+            const metaData = await metaRes.json();
+            
+            if (metaData && metaData.meta && metaData.meta.name) {
+                // Kích hoạt Radar Tìm Kiếm Kép để móc ra slug chuẩn từ KKPhim
+                targetSlug = await getSlugFromSearch(metaData.meta.name);
+            }
+        }
+
+        if (!targetSlug) return res.json({ streams: [] });
+
+        // Đua tốc độ Promise.any khi đã chốt được Slug chuẩn
         const fastStream = await Promise.any([
-            fetchKKphim(cleanId),
-            fetchNguonC(cleanId)
+            fetchStreamBySlug(targetSlug, "KKPhim", "https://kkphim.com/api/v1"),
+            fetchStreamBySlug(targetSlug, "Nguồn C", "https://phim.nguonc.com/api/v1")
         ]);
         
-        fastStream.url = sanitizeStreamUrl(fastStream.url);
         res.json({ streams: [fastStream] });
     } catch (e) {
         res.json({ streams: [] });
