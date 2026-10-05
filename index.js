@@ -16,7 +16,7 @@ function sanitizeStreamUrl(url) {
 }
 
 // ==========================================
-// KHAI BÁO MẶT TIỀN (MANIFEST & CATALOG)
+// KHAI BÁO MẶT TIỀN (MANIFEST)
 // ==========================================
 app.get('/manifest.json', (req, res) => {
     res.json({
@@ -38,8 +38,10 @@ app.get('/manifest.json', (req, res) => {
     });
 });
 
-// Giao Lộ Phân Vùng - Tích hợp Nhãn Thể Loại trực quan
-app.get('/catalog/:type/:id/:extra?.json', async (req, res) => {
+// ==========================================
+// GIAO LỘ PHÂN VÙNG (CATALOG)
+// ==========================================
+const catalogHandler = async (req, res) => {
     let page = 1;
     if (req.params.extra) {
         const match = req.params.extra.match(/skip=(\d+)/);
@@ -52,9 +54,8 @@ app.get('/catalog/:type/:id/:extra?.json', async (req, res) => {
 
         const metas = data.data.items.map(item => {
             const genreTags = item.category ? item.category.map(c => c.name) : ["Đang cập nhật"];
-
             return {
-                id: item.slug,
+                id: item.slug, // Nuvio sẽ dùng ID này để gọi stream
                 type: "movie",
                 name: item.name,
                 poster: `https://phimimg.com/${item.thumb_url}`,
@@ -67,7 +68,11 @@ app.get('/catalog/:type/:id/:extra?.json', async (req, res) => {
     } catch (error) {
         res.json({ metas: [] });
     }
-});
+};
+
+// SỬA LỖI 404: Tách thành 2 đường dẫn độc lập để Express bắt chuẩn xác
+app.get('/catalog/:type/:id.json', catalogHandler);
+app.get('/catalog/:type/:id/:extra.json', catalogHandler);
 
 // ==========================================
 // LÕI ĐUA TỐC ĐỘ (PROMISE.ANY)
@@ -87,8 +92,27 @@ async function fetchNguonC(slug) {
 }
 
 app.get('/stream/:type/:id.json', async (req, res) => {
-    const { id } = req.params;
-    const cleanId = id.split(':')[0]; 
+    const { type, id } = req.params;
+    let cleanId = id.split(':')[0]; 
+
+    // BỘ DỊCH THUẬT: Biến mã IMDB (tt...) thành tên phim không dấu (slug)
+    if (cleanId.startsWith('tt')) {
+        try {
+            const metaRes = await fetch(`https://v3-cinemeta.strem.io/meta/${type}/${cleanId}.json`);
+            const metaData = await metaRes.json();
+            if (metaData && metaData.meta) {
+                const title = metaData.meta.name;
+                cleanId = title.toLowerCase()
+                    .normalize("NFD")
+                    .replace(/[\u0300-\u036f]/g, "") // Xóa dấu tiếng Việt
+                    .replace(/[^a-z0-9\s-]/g, '')    // Giữ lại chữ, số và khoảng trắng
+                    .trim()
+                    .replace(/\s+/g, '-');           // Đổi khoảng trắng thành gạch ngang
+            }
+        } catch (e) {
+            console.log("Lỗi dịch ID:", e);
+        }
+    }
 
     try {
         const fastStream = await Promise.any([
