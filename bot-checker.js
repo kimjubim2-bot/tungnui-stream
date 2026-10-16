@@ -1,12 +1,41 @@
 /**
- * TUNGNUI PRO - BOT HARVESTER BẢO LƯU KÊNH VIỆT NAM (ANTI GEO-BLOCK)
- * Tự động săn lùng domain động KKPhim, VSMOV, NguonC & Bảo lưu 100% kênh TV Việt Nam
+ * TUNGNUI PRO 3 - BOT HARVESTER & TELEGRAM CANARY
+ * - Quét Ping bảo lưu 100% kênh Việt Nam (Anti Geo-Block)
+ * - Tự động đọc Kênh Telegram để cập nhật Domain động
  */
 
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 
+// 1. TÍNH NĂNG MỚI: NẰM VÙNG TELEGRAM LẤY DOMAIN
+const scanTelegramCanary = async () => {
+    console.log("🕵️ [TELEGRAM CANARY] Đang quét các kênh Telegram truy tìm tên miền mới...");
+    const newDomains = { kkphim: [], vsmov: [], nguonc: [] };
+    
+    // Các kênh Telegram công khai của các nhóm nguồn (Ví dụ mẫu)
+    const channels = [
+        { id: 'vsmov', url: 'https://t.me/s/vsmov_channel' },
+        { id: 'kkphim', url: 'https://t.me/s/phimapi' },
+        { id: 'nguonc', url: 'https://t.me/s/nguonccom' }
+    ];
+
+    for (const ch of channels) {
+        try {
+            const res = await axios.get(ch.url, { timeout: 3000 });
+            // Tìm các link có dạng https://xxx.com/api
+            const matches = res.data.match(/https:\/\/[a-zA-Z0-9-]+\.[a-zA-Z]+\/api/g) || [];
+            matches.forEach(link => {
+                if (!newDomains[ch.id].includes(link)) {
+                    newDomains[ch.id].push(link);
+                }
+            });
+        } catch (e) {}
+    }
+    return newDomains;
+};
+
+// Khai báo ban đầu
 const DOMAIN_CANDIDATES = {
     kkphim: ["https://phimapi.com", "https://kkphim.com"],
     vsmov: ["https://vsmov.com/api"],
@@ -15,6 +44,7 @@ const DOMAIN_CANDIDATES = {
 
 const resolveLiveApiDomain = async (serviceName, candidates, testPath) => {
     for (const baseUrl of candidates) {
+        if (!baseUrl) continue;
         try {
             const testUrl = `${baseUrl}${testPath}`;
             const res = await axios.get(testUrl, {
@@ -36,7 +66,7 @@ const resolveLiveApiDomain = async (serviceName, candidates, testPath) => {
             }
         } catch (e) {}
     }
-    return candidates[0];
+    return candidates[0]; // Trả về mặc định nếu tất cả đều chết
 };
 
 const GITHUB_SOURCES = [
@@ -80,11 +110,7 @@ const isWantedChannel = (name, genre) => {
 
 const normalizeChannelKey = (rawName) => {
     if (!rawName) return "";
-    return rawName.toLowerCase()
-        .replace(/\[.*?\]|\(.*?\)/g, '')
-        .replace(/fhd|hd|sd|4k|1080p|720p|live|24\/7|server\s*\d+|luồng\s*\d+/gi, '')
-        .replace(/k\s*\+/g, 'kplus')
-        .replace(/[^a-z0-9]/g, '');
+    return rawName.toLowerCase().replace(/\[.*?\]|\(.*?\)/g, '').replace(/fhd|hd|sd|4k|1080p|720p|live|24\/7|server\s*\d+|luồng\s*\d+/gi, '').replace(/k\s*\+/g, 'kplus').replace(/[^a-z0-9]/g, '');
 };
 
 const testStreamLatency = async (url) => {
@@ -93,14 +119,8 @@ const testStreamLatency = async (url) => {
     try {
         const res = await axios.get(url, {
             signal: AbortSignal.timeout(1500),
-            headers: {
-                "User-Agent": "Mozilla/5.0 Chrome/128.0.0.0 Safari/537.36",
-                "Range": "bytes=0-1024",
-                "X-Forwarded-For": "14.161.25.102",
-                "Client-IP": "14.161.25.102"
-            }
+            headers: { "User-Agent": "Mozilla/5.0", "Range": "bytes=0-1024", "X-Forwarded-For": "14.161.25.102", "Client-IP": "14.161.25.102" }
         });
-
         const latency = Date.now() - start;
         const content = typeof res.data === 'string' ? res.data : '';
         const isHls = (res.status === 200 || res.status === 206) && (content.includes("#EXTM3U") || content.includes("#EXTINF") || (res.headers['content-type'] || '').includes('mpegurl'));
@@ -118,7 +138,6 @@ const parseM3uContent = (content, sourceInfo) => {
     const lines = content.split("\n");
     const channels = [];
     let cur = null;
-
     for (let line of lines) {
         line = line.trim();
         if (line.startsWith("#EXTINF:")) {
@@ -127,12 +146,10 @@ const parseM3uContent = (content, sourceInfo) => {
             const groupMatch = line.match(/group-title="([^"]+)"/);
             const rawName = nameMatch ? nameMatch[1].trim() : "Kênh TV";
             const genre = groupMatch ? groupMatch[1] : "📺 Truyền Hình";
-
             if (sourceInfo.isGlobalSource && !isWantedChannel(rawName, genre)) {
                 cur = null;
                 continue;
             }
-
             cur = { rawName, logo: logoMatch ? logoMatch[1] : "", genre, author: sourceInfo.author, streamUrl: "" };
         } else if (line.startsWith("http") && cur) {
             cur.streamUrl = line;
@@ -145,9 +162,15 @@ const parseM3uContent = (content, sourceInfo) => {
 
 const runMultiSourceBot = async () => {
     console.log("==================================================================");
-    console.log("🤖 BẮT ĐẦU QUÉT SIÊU TỐC & BẢO LƯU KÊNH VIỆT NAM (ANTI GEO-BLOCK)");
+    console.log("🤖 BẮT ĐẦU QUÉT SIÊU TỐC & BẢO LƯU KÊNH VIỆT NAM");
     console.log("==================================================================");
     const globalStart = Date.now();
+
+    // KẾT HỢP TELEGRAM CANARY
+    const teleDomains = await scanTelegramCanary();
+    if (teleDomains.kkphim.length > 0) DOMAIN_CANDIDATES.kkphim.unshift(...teleDomains.kkphim);
+    if (teleDomains.vsmov.length > 0) DOMAIN_CANDIDATES.vsmov.unshift(...teleDomains.vsmov);
+    if (teleDomains.nguonc.length > 0) DOMAIN_CANDIDATES.nguonc.unshift(...teleDomains.nguonc);
 
     // 1. DÒ TÌM DOMAIN PHIM ĐỘNG
     const [liveKkphim, liveVsmov, liveNguonc] = await Promise.all([
@@ -171,8 +194,6 @@ const runMultiSourceBot = async () => {
         }
     });
 
-    console.log(`📦 Thu thập được ${allRawStreams.length} luồng tinh tuyển.`);
-
     const channelClusters = new Map();
     allRawStreams.forEach(item => {
         const key = normalizeChannelKey(item.rawName);
@@ -184,19 +205,13 @@ const runMultiSourceBot = async () => {
         if (cluster.candidateUrls.size < 3 && item.streamUrl) cluster.candidateUrls.add(item.streamUrl);
     });
 
-    console.log(`🎯 Sau chuẩn hóa: Gom được ${channelClusters.size} kênh truyền hình chất lượng.`);
-
     // 3. QUÉT SONG SONG VÀ BẢO LƯU TUYỆT ĐỐI KÊNH VIỆT NAM
     const finalChannels = [];
     const entries = Array.from(channelClusters.entries());
     const BATCH_SIZE = 40;
-    const totalBatches = Math.ceil(entries.length / BATCH_SIZE);
 
     for (let i = 0; i < entries.length; i += BATCH_SIZE) {
         const batch = entries.slice(i, i + BATCH_SIZE);
-        const batchIndex = Math.floor(i / BATCH_SIZE) + 1;
-        console.log(`⚡ Đang quét song song đợt ${batchIndex}/${totalBatches} (${entries.length - i} kênh còn lại)...`);
-
         await Promise.all(batch.map(async ([key, info]) => {
             const urls = Array.from(info.candidateUrls);
             let bestUrl = null, lowestLatency = 99999;
@@ -210,12 +225,8 @@ const runMultiSourceBot = async () => {
                 }
             }
 
-            // Bảo lưu 100% kênh Việt Nam dù máy ảo Mỹ bị chặn
-            if (!bestUrl && info.isVn && urls.length > 0) {
-                bestUrl = urls[0];
-                lowestLatency = 200;
-            }
-
+            // BẢO LƯU KÊNH VIỆT NAM (ANTI GEO-BLOCK)
+            if (!bestUrl && info.isVn && urls.length > 0) { bestUrl = urls[0]; lowestLatency = 200; }
             if (!bestUrl) {
                 let fallbackKey = null;
                 if (key.includes("vtv1")) fallbackKey = "vtv1";
@@ -226,29 +237,18 @@ const runMultiSourceBot = async () => {
                 else if (key.includes("kplus") && key.includes("sport1")) fallbackKey = "kplus_sport_1";
                 else if (key.includes("vtc3")) fallbackKey = "vtc3";
 
-                if (fallbackKey && FALLBACK_POOL[fallbackKey]) {
-                    bestUrl = FALLBACK_POOL[fallbackKey][0];
-                    lowestLatency = 150;
-                }
+                if (fallbackKey && FALLBACK_POOL[fallbackKey]) { bestUrl = FALLBACK_POOL[fallbackKey][0]; lowestLatency = 150; }
             }
 
             if (bestUrl) {
-                finalChannels.push({
-                    id: "vmttv_" + Buffer.from(key).toString("hex").slice(0, 12),
-                    name: info.displayName,
-                    poster: info.logo,
-                    genre: info.genre,
-                    streamUrl: bestUrl,
-                    latency: lowestLatency
-                });
+                finalChannels.push({ id: "vmttv_" + Buffer.from(key).toString("hex").slice(0, 12), name: info.displayName, poster: info.logo, genre: info.genre, streamUrl: bestUrl, latency: lowestLatency });
             }
         }));
     }
 
     finalChannels.sort((a, b) => {
         const getPriority = (item) => {
-            const name = (item.name || "").toLowerCase();
-            const genre = (item.genre || "").toLowerCase();
+            const name = (item.name || "").toLowerCase(), genre = (item.genre || "").toLowerCase();
             if (name.includes("vtv")) return 1;
             if (name.includes("drt") || name.includes("đà nẵng")) return 2;
             if (name.includes("on ") || name.includes("sctv")) return 3;
